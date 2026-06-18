@@ -1,3 +1,10 @@
+3.5.0 2025-06-18
+- Python 3 improved version
+- remove outdated configs and docs
+- add .gitignore to protect sensitive config
+- add shadowsocks.json.example
+- clean git history for public release
+
 3.4.0 2017-07-27
 - add auth_chain_b
 - add initmudbjson.sh
