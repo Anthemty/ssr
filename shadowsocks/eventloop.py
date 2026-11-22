@@ -177,7 +177,10 @@ class EventLoop(object):
         self._impl.unregister(fd)
 
     def removefd(self, fd):
-        del self._fdmap[fd]
+        # a socket may be closed before it was ever added to the loop
+        # (e.g. connect() failed), so a missing fd is not an error
+        if self._fdmap.pop(fd, None) is None:
+            return
         self._impl.unregister(fd)
 
     def add_periodic(self, callback):
