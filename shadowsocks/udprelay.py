@@ -91,6 +91,11 @@ WAIT_STATUS_WRITING = 2
 WAIT_STATUS_READWRITING = WAIT_STATUS_READING | WAIT_STATUS_WRITING
 
 BUF_SIZE = 65536
+# Larger kernel receive buffer so bursts (e.g. QUIC) are not dropped while the
+# single-threaded loop is busy; net.core.rmem_max must allow it.
+UDP_RCVBUF = 4 * 1024 * 1024
+# Max datagrams read per readiness event before returning to the event loop.
+UDP_DRAIN_MAX = 64
 DOUBLE_SEND_BEG_IDS = 16
 POST_MTU_MIN = 500
 POST_MTU_MAX = 1400
@@ -122,6 +127,12 @@ RSP_STATE_CONNECTEDREMOTE = b"\x02"
 RSP_STATE_ERROR = b"\x03"
 RSP_STATE_DISCONNECT = b"\x04"
 RSP_STATE_REDIRECT = b"\x05"
+
+def _set_rcvbuf(sock):
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, UDP_RCVBUF)
+    except socket.error as e:
+        logging.debug('set UDP SO_RCVBUF failed: %s' % (e,))
 
 def client_key(source_addr, server_af):
     # notice this is server af, not dest af
@@ -211,6 +222,7 @@ class UDPRelay(object):
                             (self._listen_addr, self._listen_port))
         af, socktype, proto, canonname, sa = addrs[0]
         server_socket = socket.socket(af, socktype, proto)
+        _set_rcvbuf(server_socket)
         server_socket.bind((self._listen_addr, self._listen_port))
         server_socket.setblocking(False)
         self._server_socket = server_socket
@@ -422,6 +434,7 @@ class UDPRelay(object):
                         # drop
                         return
                 client = socket.socket(af, socktype, proto)
+                _set_rcvbuf(client)
                 client_uid = uid
                 client.setblocking(False)
                 self._socket_bind_addr(client, af)
@@ -602,21 +615,34 @@ class UDPRelay(object):
         if sock == self._server_socket:
             if event & eventloop.POLL_ERR:
                 logging.error('UDP server_socket err')
-            try:
-                self._handle_server()
-            except Exception as e:
-                shell.print_exception(e)
-                if self._config['verbose']:
-                    traceback.print_exc()
+            # each call consumes one datagram; drain the queue so bursts
+            # don't overflow the kernel buffer between loop iterations
+            for _ in range(UDP_DRAIN_MAX):
+                try:
+                    self._handle_server()
+                except BlockingIOError:
+                    break
+                except Exception as e:
+                    shell.print_exception(e)
+                    if self._config['verbose']:
+                        traceback.print_exc()
+                    break
         elif sock and (fd in self._sockets):
             if event & eventloop.POLL_ERR:
                 logging.error('UDP client_socket err')
-            try:
-                self._handle_client(sock)
-            except Exception as e:
-                shell.print_exception(e)
-                if self._config['verbose']:
-                    traceback.print_exc()
+            for _ in range(UDP_DRAIN_MAX):
+                try:
+                    self._handle_client(sock)
+                except BlockingIOError:
+                    break
+                except Exception as e:
+                    shell.print_exception(e)
+                    if self._config['verbose']:
+                        traceback.print_exc()
+                    break
+                # the handler may close the socket (e.g. after a DNS reply)
+                if fd not in self._sockets:
+                    break
         else:
             if sock:
                 handler = self._fd_to_handlers.get(fd, None)

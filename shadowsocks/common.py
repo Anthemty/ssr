@@ -245,6 +245,11 @@ class IPNetwork(object):
     ADDRLENGTH = {socket.AF_INET: 32, socket.AF_INET6: 128, False: 0}
 
     def __init__(self, addrs):
+        # values from the JSON config arrive as bytes (see shell._decode_dict)
+        if isinstance(addrs, (list, tuple)):
+            addrs = [to_str(a) for a in addrs]
+        else:
+            addrs = to_str(addrs)
         self.addrs_str = addrs
         self._network_list_v4 = []
         self._network_list_v6 = []
@@ -253,7 +258,8 @@ class IPNetwork(object):
         list(map(self.add_network, addrs))
 
     def add_network(self, addr):
-        if addr is "":
+        addr = to_str(addr).strip()
+        if not addr:
             return
         block = addr.split('/')
         addr_family = is_ip(block[0])
@@ -265,9 +271,9 @@ class IPNetwork(object):
             ip = (hi << 64) | lo
         else:
             raise Exception("Not a valid CIDR notation: %s" % addr)
-        if len(block) is 1:
+        if len(block) == 1:
             prefix_size = 0
-            while (ip & 1) == 0 and ip is not 0:
+            while (ip & 1) == 0 and ip != 0:
                 ip >>= 1
                 prefix_size += 1
             logging.warn("You did't specify CIDR routing prefix size for %s, "
