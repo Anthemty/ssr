@@ -94,6 +94,8 @@ NETWORK_MTU = 1500
 TCP_MSS = NETWORK_MTU - 40
 BUF_SIZE = 32 * 1024
 UDP_MAX_BUF_SIZE = 65536
+# TCP_FASTOPEN (option 23) pending-SYN queue length on the listen socket
+TFO_QLEN = 256
 
 class SpeedTester(object):
     def __init__(self, max_speed = 0):
@@ -1220,7 +1222,7 @@ class TCPRelay(object):
         server_socket.setblocking(False)
         if config['fast_open']:
             try:
-                server_socket.setsockopt(socket.SOL_TCP, 23, 5)
+                server_socket.setsockopt(socket.SOL_TCP, 23, TFO_QLEN)
             except socket.error:
                 logging.error('warning: fast open is not available')
                 self._config['fast_open'] = False
