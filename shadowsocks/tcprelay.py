@@ -748,7 +748,8 @@ class TCPRelayHandler(object):
 
     def _handle_dns_resolved(self, result, error):
         if error:
-            self._log_error(error)
+            logging.debug('%s when handling connection from %s:%d' %
+                          (error, self._client_address[0], self._client_address[1]))
             self.destroy()
             return
         if result:

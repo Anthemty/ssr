@@ -477,6 +477,7 @@ class UDPRelay(object):
         except Exception as e:
             shell.print_exception(e)
             logging.error("exception from user %d" % (user_id,))
+            return
 
         try:
             client.sendto(data, (server_addr, server_port))
@@ -650,6 +651,9 @@ class UDPRelay(object):
                     handler.handle_event(sock, event)
             else:
                 logging.warn('poll removed fd')
+        # tell the event loop work was done; a falsy return makes it
+        # sleep 1 ms, which throttles UDP-only bursts
+        return True
 
     def handle_periodic(self):
         if self._closed:

@@ -19,6 +19,7 @@ from __future__ import absolute_import, division, print_function, \
     with_statement
 
 import os
+import time
 import socket
 import struct
 import re
@@ -264,6 +265,16 @@ class DNSResponse(object):
 STATUS_IPV4 = 0
 STATUS_IPV6 = 1
 
+# a query with no answer is re-sent every DNS_RETRY_INTERVAL seconds and
+# given up after DNS_TIMEOUT seconds (checked from the periodic callback,
+# which runs about every 2 s); without this a lost UDP query left the
+# connection hanging until the relay timeout
+DNS_RETRY_INTERVAL = 1.5
+DNS_TIMEOUT = 7
+# failed names are remembered briefly so bursts of retries for names that
+# cannot resolve don't each go upstream
+NEG_CACHE_TTL = 10
+
 
 class DNSResolver(object):
 
@@ -274,6 +285,8 @@ class DNSResolver(object):
         self._hostname_to_cb = {}
         self._cb_to_hostname = {}
         self._cache = lru_cache.LRUCache(timeout=300)
+        self._neg_cache = lru_cache.LRUCache(timeout=NEG_CACHE_TTL)
+        self._hostname_sent = {}  # hostname -> [first_sent, last_sent]
         self._sock = None
         self._servers = None
         self._parse_resolv()
@@ -369,6 +382,9 @@ class DNSResolver(object):
             del self._hostname_to_cb[hostname]
         if hostname in self._hostname_status:
             del self._hostname_status[hostname]
+        self._hostname_sent.pop(hostname, None)
+        if not ip:
+            self._neg_cache[hostname] = True
 
     def _handle_data(self, data):
         response = parse_response(data)
@@ -388,6 +404,8 @@ class DNSResolver(object):
                 else:
                     if ip:
                         self._cache[hostname] = ip
+                        if hostname in self._neg_cache:
+                            del self._neg_cache[hostname]
                         self._call_callback(hostname, ip)
                     elif self._hostname_status.get(hostname, None) == STATUS_IPV4:
                         for question in response.questions:
@@ -402,6 +420,8 @@ class DNSResolver(object):
                 else:
                     if ip:
                         self._cache[hostname] = ip
+                        if hostname in self._neg_cache:
+                            del self._neg_cache[hostname]
                         self._call_callback(hostname, ip)
                     elif self._hostname_status.get(hostname, None) == STATUS_IPV6:
                         for question in response.questions:
@@ -411,7 +431,7 @@ class DNSResolver(object):
 
     def handle_event(self, sock, fd, event):
         if sock != self._sock:
-            return
+            return True
         if event & eventloop.POLL_ERR:
             logging.error('dns socket err')
             self._loop.remove(self._sock)
@@ -425,11 +445,29 @@ class DNSResolver(object):
             data, addr = sock.recvfrom(1024)
             if addr not in self._servers:
                 logging.warn('received a packet other than our dns')
-                return
+                return True
             self._handle_data(data)
+        # a falsy return makes the event loop sleep 1 ms
+        return True
 
     def handle_periodic(self):
         self._cache.sweep()
+        self._neg_cache.sweep()
+        if not self._hostname_sent:
+            return
+        now = time.time()
+        for hostname, sent in list(self._hostname_sent.items()):
+            if now - sent[0] >= DNS_TIMEOUT:
+                logging.debug('dns timeout: %s', hostname)
+                self._call_callback(hostname, None)
+            elif now - sent[1] >= DNS_RETRY_INTERVAL:
+                if self._hostname_status.get(hostname) == STATUS_IPV6:
+                    qtype = QTYPE_AAAA
+                else:
+                    qtype = QTYPE_A
+                logging.debug('dns retry: %s', hostname)
+                sent[1] = now
+                self._send_req(hostname, qtype)
 
     def remove_callback(self, callback):
         hostname = self._cb_to_hostname.get(callback)
@@ -442,6 +480,7 @@ class DNSResolver(object):
                     del self._hostname_to_cb[hostname]
                     if hostname in self._hostname_status:
                         del self._hostname_status[hostname]
+                    self._hostname_sent.pop(hostname, None)
 
     def _send_req(self, hostname, qtype):
         req = build_request(hostname, qtype)
@@ -465,6 +504,9 @@ class DNSResolver(object):
             logging.debug('hit cache: %s', hostname)
             ip = self._cache[hostname]
             callback((hostname, ip), None)
+        elif hostname in self._neg_cache:
+            callback((hostname, None),
+                     Exception('unable to parse hostname %s' % hostname))
         else:
             if not is_valid_hostname(hostname):
                 callback(None, Exception('invalid hostname: %s' % hostname))
@@ -488,13 +530,12 @@ class DNSResolver(object):
                     self._send_req(hostname, QTYPE_A)
                 self._hostname_to_cb[hostname] = [callback]
                 self._cb_to_hostname[callback] = hostname
+                now = time.time()
+                self._hostname_sent[hostname] = [now, now]
             else:
+                # already in flight; handle_periodic re-sends if it stalls
                 arr.append(callback)
-                # TODO send again only if waited too long
-                if IPV6_CONNECTION_SUPPORT:
-                    self._send_req(hostname, QTYPE_AAAA)
-                else:
-                    self._send_req(hostname, QTYPE_A)
+                self._cb_to_hostname[callback] = hostname
 
     def close(self):
         if self._sock:

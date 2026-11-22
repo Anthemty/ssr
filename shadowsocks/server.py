@@ -102,8 +102,8 @@ def main():
             password = password_obfs
         a_config = config.copy()
         ipv6_ok = False
-        logging.info("server start with protocol[%s] password [%s] method [%s] obfs [%s] obfs_param [%s]" %
-                (protocol, password, method, obfs, obfs_param))
+        logging.info("server start with protocol[%s] method [%s] obfs [%s]" %
+                (protocol, method, obfs))
         if 'server_ipv6' in a_config:
             try:
                 if len(a_config['server_ipv6']) > 2 and a_config['server_ipv6'][0] == "[" and a_config['server_ipv6'][-1] == "]":
